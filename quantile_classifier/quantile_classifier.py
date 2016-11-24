@@ -1,7 +1,6 @@
 import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin
 from fastkde import fastKDE
-from scipy.interpolate import griddata
 
 
 def _LLR_metric(s, b):
@@ -50,7 +49,7 @@ class FastKDE:
 
     def __init__(self, X, sample_weight,
                  use_copulas=True,
-                 interp_method='cubic',
+                 interp_method='grid',
                  **kw):
         """
         X must have dimensions            (n_samples, dimension)
@@ -157,6 +156,7 @@ class FastKDE:
                                           for our usage>
         """
         from scipy.spatial import KDTree
+        from scipy.interpolate import griddata, interpn
 
         self.use_copulas_ = use_copulas
 
@@ -168,32 +168,57 @@ class FastKDE:
         # pdf_obj = fastKDE.fastKDE(X)
         pdf, axes = fastKDE.pdf(*X.T, **kw)
         # print "sanity check: ", (pdf_obj.pdf == pdf)
-        _interp_points = FastKDE.expand_axes(axes).T
+        # TODO: make sure this works with regards to the comment below
+        # regarding the flipped nature of the pdf
+        _interp_points = FastKDE.expand_axes(axes)
         self.interp_points_tree = KDTree(_interp_points)
-        self.interp = lambda x: griddata(points=_interp_points,
-                                         values=np.ravel(pdf),
-                                         xi=x,
-                                         method=interp_method,
-                                         rescale=True,
-                                         fill_value=np.nan
-                                         )
+
+        # TODO: contact fastKDE author after inspecting source code
+        # After inspecting the dimensions of the output with the following
+        # inputs:
+        # X, y = make_classification(n_samples=1000, n_features=2,
+        #                            n_informative=2,
+        #                            n_classes=3, n_redundant=0,
+        #                            n_clusters_per_class=1, random_state=0)
+        # it seems like the x-y axes are flippped(!) in the pdf grid. Thus,
+        # I need to take the transpose of the pdf grid. The following
+        # statements demonstrate this below.
+        # print np.max(X.T, axis=1)
+        # print np.min(X.T, axis=1)
+        # print axes[0][-1], axes[1][-1]
+        # print axes[0][0], axes[1][0]
+        # print pdf.shape, axes[0].shape, axes[1].shape
+        # return
+
+        if interp_method == 'grid':
+            # faster method that relies on data being placed on a grid
+            self.interp = lambda x: interpn(points=axes,
+                                            values=pdf.T,
+                                            xi=x,
+                                            method='splinef2d',
+                                            bounds_error=False,
+                                            fill_value=np.nan
+                                            )
+        else:
+            # slower, more generic method
+            self.interp = lambda x: griddata(points=_interp_points,
+                                             values=np.ravel(pdf.T),
+                                             xi=x,
+                                             method='cubic',
+                                             rescale=True,
+                                             fill_value=np.nan
+                                             )
 
     @staticmethod
     def expand_axes(X):
+        """
+        Utility method for making cartesian product (could just use
+        sklearn.utils.extmath, but this is slightly faster)
+        """
         # check for "list of list"
         if all(type(elem).__module__ == np.__name__ for elem in X):
-            dims = np.empty(len(X), dtype=np.int32)
-            for i in range(len(X)):
-                dims[i] = X[i].size
-            total_dim = np.prod(dims)
-            result = np.empty((len(X), total_dim))
-            for index in range(len(result)):
-                result[index] = np.tile(np.repeat(X[index],
-                                                  np.prod(dims) /
-                                                  np.prod(dims[:index+1])),
-                                        np.prod(dims[:index]))
-            return result
-        # otherwise, for just single list
+            return np.array(np.meshgrid(*X)).T.reshape(-1, len(X))
+        # otherwise, for just the single list
         return X
 
     def __call__(self, X):
@@ -295,7 +320,8 @@ class QuantileClassifier (BaseEstimator, ClassifierMixin):
             _sample_weight = sample_weight[y == class_label]
             self.pdfs_[class_label] = FastKDE(_X,
                                               _sample_weight,
-                                              use_copulas)
+                                              use_copulas,
+                                              interp_method='grid')
             self.pdf_weights_[class_label] = _sample_weight.sum()
             self.class_distributions_[class_label] = \
                 self.pdf_weights_[class_label]*self.pdfs_[class_label](X)
