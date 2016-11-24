@@ -273,7 +273,8 @@ class QuantileClassifier (BaseEstimator, ClassifierMixin):
                        multi-dimensional PDF (default True)
         metric -- Callable used to calculate the significance of a point given
                   given the signal and background yields (default CERN ATLAS
-                  LLR)
+                  LLR). Should operate on numpy arrays and the convention is
+                  that larger values of the metric are more "signal" like.
         """
         import inspect
 
@@ -361,14 +362,20 @@ class QuantileClassifier (BaseEstimator, ClassifierMixin):
         percentile_ratios_ = self._compute_percentile_ratio_dict(X, metric)
         # find maximum
         best_percentile_ratios_ = \
-                np.array(percentile_ratios_.keys())[np.argmax(np.array(
+            np.array(percentile_ratios_.keys())[np.argmax(np.array(
                                         percentile_ratios_.values()), axis=0)]
 
         return best_percentile_ratios_
 
     def predict_proba(self, X):
-        from sklearn.utils.validation import check_array, check_is_fitted
         from sklearn.preprocessing import normalize
+
+        percentile_ratios_probabilities_ = self.decision_function(X)
+
+        return normalize(percentile_ratios_probabilities_, axis=1, norm='l1')
+
+    def decision_function(self, X):
+        from sklearn.utils.validation import check_array, check_is_fitted
 
         # Check is fit had been called
         check_is_fitted(self, ['X_', 'y_'])
@@ -386,7 +393,7 @@ class QuantileClassifier (BaseEstimator, ClassifierMixin):
         percentile_ratios_probabilities_ = \
             np.array([percentile_ratios_[k] for k in self.classes_]).T
 
-        return normalize(percentile_ratios_probabilities_, axis=1, norm='l1')
+        return percentile_ratios_probabilities_
 
     def score(self, X, y, sample_weight=None):
         """
