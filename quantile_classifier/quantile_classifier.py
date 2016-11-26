@@ -1,6 +1,15 @@
 import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin
-from fastkde import fastKDE
+# NOTE: No longer classifying by quantile of metric distributions. Now simply
+# using raw metric values as this seems to give much better decision
+# boundaries and slightly better performance.
+# TODO: Implement copula multi-dimensional density estimator
+#       - allow for different kernel estimators
+#       - will implement scikit-learn interface (BaseEstimator)
+
+
+def _LLR_metric_unsafe(s_, sum_, log_sum_, log_b_):
+    return np.sqrt(np.absolute(2.0*(sum_*(log_sum_ - log_b_) - s_)))
 
 
 def _LLR_metric(s, b):
@@ -14,7 +23,9 @@ def _LLR_metric(s, b):
 
     # as long as s >= 0 and b > 0, this function is well behaved
     valid_sb_indices_ = np.logical_and(s >= 0, b > 0)
-    if np.count_nonzero(valid_sb_indices_) > 0:
+    is_valid = np.count_nonzero(valid_sb_indices_) > 0
+    b_ = None
+    if is_valid:
         # this operation can be numerically unstable (adding very small
         #   numbers to large numbers (s+b) is always risky), thus the absolute
         #   value of the argument to the sqrt must be taken
@@ -26,16 +37,24 @@ def _LLR_metric(s, b):
         np.log(sum_, out=log_sum_)
         log_b_ = np.empty(b_.size, np.dtype('Float64'))
         np.log(b_, out=log_b_)
-        result[valid_sb_indices_] = \
-            np.sqrt(np.absolute(2.0*(sum_*(log_sum_ - log_b_) - s_)))
+        result[valid_sb_indices_] = _LLR_metric_unsafe(s_, sum_,
+                                                       log_sum_, log_b_)
 
-    # else, just return a Poisson error in the case of zero background
+    # else, just set background to either the minimum, non-zero background or
+    # the minimum, non-zero signal
     valid_s_indices_ = np.logical_and(s > 0, np.logical_not(valid_sb_indices_))
     if np.count_nonzero(valid_s_indices_) > 0:
         s_ = s[valid_s_indices_]
-        div = np.empty(s_.size, np.dtype('Float64'))
-        np.divide(s_, np.sqrt(s_), div)
-        result[valid_s_indices_] = div
+        if is_valid:
+            valid_b_min = np.min(b_)
+        else:
+            valid_b_min = np.min(s[s > 0])
+        sum_ = s_ + valid_b_min
+        log_sum_ = np.empty(sum_.size, np.dtype('Float64'))
+        np.log(sum_, out=log_sum_)
+        log_b_ = np.log(b_)
+        result[valid_s_indices_] = _LLR_metric_unsafe(s_, sum_,
+                                                      log_sum_, log_b_)
 
     return result
 
@@ -155,6 +174,7 @@ class FastKDE:
                                           fastKDE object - likely worthless
                                           for our usage>
         """
+        from fastkde import fastKDE
         from scipy.spatial import KDTree
         from scipy.interpolate import griddata, interpn
 
@@ -168,8 +188,6 @@ class FastKDE:
         # pdf_obj = fastKDE.fastKDE(X)
         pdf, axes = fastKDE.pdf(*X.T, **kw)
         # print "sanity check: ", (pdf_obj.pdf == pdf)
-        # TODO: make sure this works with regards to the comment below
-        # regarding the flipped nature of the pdf
         _interp_points = FastKDE.expand_axes(axes)
         self.interp_points_tree = KDTree(_interp_points)
 
@@ -291,6 +309,10 @@ class QuantileClassifier (BaseEstimator, ClassifierMixin):
         """
         from sklearn.utils.multiclass import unique_labels
         from sklearn.utils.validation import check_X_y
+        # from scipy.stats import gaussian_kde  # gives better results for now
+        from sklearn.neighbors import KernelDensity
+        # from sklearn.neighbors import BallTree
+        # from sklearn.neighbors import DistanceMetric, EuclideanDistance
 
         # Check that X and y have correct shape
         X, y = check_X_y(X, y)
@@ -319,10 +341,22 @@ class QuantileClassifier (BaseEstimator, ClassifierMixin):
         for class_label in self.classes_:  # pdf index
             _X = X[y == class_label]
             _sample_weight = sample_weight[y == class_label]
-            self.pdfs_[class_label] = FastKDE(_X,
-                                              _sample_weight,
-                                              use_copulas,
-                                              interp_method='grid')
+            # try scikit-learns's KernelDensity (extra args to lambda are for
+            # closure scope)
+            kernel_type = 'gaussian'
+            bw = 0.3
+            self.pdfs_[class_label] = \
+                lambda x,\
+                kde=KernelDensity(kernel=kernel_type, bandwidth=bw).fit(_X):\
+                np.exp(kde.score_samples(x))
+            # try scipy's gaussian_kde (extra args to lambda are for closure
+            # scope)
+            # self.pdfs_[class_label] = lambda x, kde=gaussian_kde(_X.T): kde(x.T)
+            # try new fastKDE
+            # self.pdfs_[class_label] = FastKDE(_X,
+            #                                   _sample_weight,
+            #                                   use_copulas,
+            #                                   interp_method='grid')
             self.pdf_weights_[class_label] = _sample_weight.sum()
             self.class_distributions_[class_label] = \
                 self.pdf_weights_[class_label]*self.pdfs_[class_label](X)
@@ -347,7 +381,7 @@ class QuantileClassifier (BaseEstimator, ClassifierMixin):
     def predict(self, X):
         from sklearn.utils.validation import check_array, check_is_fitted
 
-        # Check is fit had been called
+        # Check if fit had been called
         check_is_fitted(self, ['X_', 'y_'])
 
         # Input validation
@@ -359,7 +393,7 @@ class QuantileClassifier (BaseEstimator, ClassifierMixin):
             metric = self.metric
 
         # logic here
-        percentile_ratios_ = self._compute_percentile_ratio_dict(X, metric)
+        percentile_ratios_ = self._compute_decision_dict(X, metric)
         # find maximum
         best_percentile_ratios_ = \
             np.array(percentile_ratios_.keys())[np.argmax(np.array(
@@ -370,30 +404,21 @@ class QuantileClassifier (BaseEstimator, ClassifierMixin):
     def predict_proba(self, X):
         from sklearn.preprocessing import normalize
 
-        percentile_ratios_probabilities_ = self.decision_function(X)
-
-        return normalize(percentile_ratios_probabilities_, axis=1, norm='l1')
+        result = self._decision_function_raw(X)
+        result = normalize(result, axis=1, norm='l1')
+        # if only two classes just return class 0 array (consistent with
+        # scikit-learn)
+        if len(self.classes_) == 2:
+            result = result.T[1]
+        return result
 
     def decision_function(self, X):
-        from sklearn.utils.validation import check_array, check_is_fitted
-
-        # Check is fit had been called
-        check_is_fitted(self, ['X_', 'y_'])
-
-        # Input validation
-        X = check_array(X)
-
-        if self.metric is None:
-            metric = _LLR_metric
-        else:
-            metric = self.metric
-
-        # logic here
-        percentile_ratios_ = self._compute_percentile_ratio_dict(X, metric)
-        percentile_ratios_probabilities_ = \
-            np.array([percentile_ratios_[k] for k in self.classes_]).T
-
-        return percentile_ratios_probabilities_
+        result = self._decision_function_raw(X)
+        # if only two classes just return class 0 array (consistent with
+        # scikit-learn)
+        if len(self.classes_) == 2:
+            result = result.T[1]
+        return result
 
     def score(self, X, y, sample_weight=None):
         """
@@ -412,12 +437,48 @@ class QuantileClassifier (BaseEstimator, ClassifierMixin):
         the training data given a class index (must be run after a call to the
         fit function)
         """
+        from sklearn.utils.validation import check_is_fitted
+
+        # Check if fit had been called
+        check_is_fitted(self, ['X_', 'y_'])
+
         sub_dists = {}
         m_dist = self.metric_distributions_[class_label]
         for subclass_label in self.classes_:
             sub_dists[subclass_label] = \
                 np.sort(m_dist[self.y_ == subclass_label])
         return sub_dists
+
+    def _compute_decision_dict(self, X, metric):
+        # return self._compute_percentile_ratio_dict(X, metric)
+        return self._compute_metric_dict(X, metric)
+
+    def _compute_metric_dict(self, X, metric):
+        """
+        Internal helper function that returns a dictionaries of arrays of
+        metric values given a class index (must be run after a call to the
+        fit function)
+        """
+        class_distributions_ = {}
+        for class_label in self.classes_:  # pdf index
+            class_distributions_[class_label] = \
+                self.pdf_weights_[class_label]*self.pdfs_[class_label](X)
+
+        metric_distributions_ = {}
+        for class_label in self.classes_:  # signal index
+            _signal_total = class_distributions_[class_label]
+            _background_total = None
+
+            for k, v in class_distributions_.items():  # background index
+                if class_label == k:
+                    continue
+                _background_total = v if _background_total is None else\
+                    _background_total + v
+
+            metric_distributions_[class_label] = \
+                metric(_signal_total, _background_total)
+
+        return metric_distributions_
 
     def _compute_percentile_ratio_dict(self, X, metric):
         """
@@ -471,3 +532,24 @@ class QuantileClassifier (BaseEstimator, ClassifierMixin):
             result[k] = result_
 
         return result
+
+    def _decision_function_raw(self, X):
+        from sklearn.utils.validation import check_array, check_is_fitted
+
+        # Check is fit had been called
+        check_is_fitted(self, ['X_', 'y_'])
+
+        # Input validation
+        X = check_array(X)
+
+        if self.metric is None:
+            metric = _LLR_metric
+        else:
+            metric = self.metric
+
+        # logic here
+        percentile_ratios_ = self._compute_decision_dict(X, metric)
+        percentile_ratios_probabilities_ = \
+            np.array([percentile_ratios_[k] for k in self.classes_]).T
+
+        return percentile_ratios_probabilities_

@@ -15,129 +15,52 @@ from quantile_classifier import QuantileClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import AdaBoostClassifier
 from sklearn.svm import SVC
+from sklearn.neighbors import KNeighborsClassifier
 # classifier performance
 from sklearn.metrics import classification_report, confusion_matrix
-from sklearn.metrics import roc_auc_score, roc_curve, auc
+from sklearn.metrics import roc_auc_score
+from qc_plotting_tools import multi_class_roc_curves, compare_train_test_all_classes, plot_decision_boundary_2D
 
 
-def multi_class_roc_curves(classes, y_test, y_scores, c_name):
-    # Compute ROC curve and ROC area for each class
-    # classes should be something like classifier.classes_
-    # y_scores should have dimensions (n_samples, n_classes) = (output of
-    # decision_function)
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    from itertools import cycle
-
-    fpr = dict()
-    tpr = dict()
-    roc_auc = dict()
-    all_y_test = []
-    for i, c in enumerate(classes):
-        c_y_test = y_test.copy()
-        c_y_test_signal = y_test == c
-        c_y_test_background = y_test != c
-        c_y_test[c_y_test_signal] = 1.0
-        c_y_test[c_y_test_background] = 0.0
-        fpr[c], tpr[c], _ = roc_curve(c_y_test, y_scores.T[i])
-        roc_auc[c] = auc(fpr[c], tpr[c])
-        all_y_test.append(c_y_test)
-    all_y_test = np.array(all_y_test)
-    # Compute micro-average ROC curve and ROC area
-    fpr["micro"], tpr["micro"], _ = roc_curve(all_y_test.ravel(),
-                                              y_scores.T.ravel())
-    roc_auc["micro"] = auc(fpr["micro"], tpr["micro"])
-
-    # Plot all ROC curves
-    lw = 2
-    plt.figure()
-    plt.plot(fpr["micro"], tpr["micro"],
-             label='micro-average ROC curve (area = {0:0.2f})'
-                   ''.format(roc_auc["micro"]),
-             color='black', linestyle=':', linewidth=4)
-
-    colors = cycle(['aqua', 'darkorange', 'cornflowerblue', 'red'])
-    for c, color in zip(classes, colors):
-        plt.plot(fpr[c], tpr[c], color=color, lw=lw,
-                 label='ROC curve of class {0} (area = {1:0.2f})'
-                       ''.format(c, roc_auc[c]))
-
-    plt.plot([0, 1], [0, 1], 'k--', lw=lw)
-    plt.xlim([0.0, 1.0])
-    plt.ylim([0.0, 1.05])
-    plt.xlabel('False Positive Rate')
-    plt.ylabel('True Positive Rate')
-    plt.title('Receiver operating characteristic for {}'.format(c_name))
-    plt.legend(loc="lower right")
-    file_name = '{}_roc_curves.pdf'.format(c_name)
-    print 'Saving ROC curves to file: {}'.format(file_name)
-    plt.savefig(file_name, format='pdf')
+def show_performance(n, y_test, y_predicted, classes, number_of_classes):
+    print "\nPerformance of {}:".format(n)
+    print classification_report(y_test, y_predicted,
+                                # target_names=["background", "signal"]
+                                )
+    print "Confusion matrix for classes: ", classes
+    print confusion_matrix(y_test, y_predicted, labels=classes)
+    if number_of_classes == 2:
+        print "Area under ROC curve: {:.4}".format(
+                                        roc_auc_score(y_test, y_predicted))
 
 
-def compare_train_test_all_classes(clf, c_name, X_train, y_train,
-                                   X_test, y_test, bins=30):
-    decisions = []
-    for X, y in ((X_train, y_train), (X_test, y_test)):
-        d1 = clf.decision_function(X[y > 0.5]).ravel()
-        d2 = clf.decision_function(X[y < 0.5]).ravel()
-        decisions += [d1, d2]
-        # compare_train_test_single_class
-
-
-def compare_train_test_single_class(decisions, c_name, class_n, bins=30):
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-
-    low = min(np.min(d) for d in decisions)
-    high = max(np.max(d) for d in decisions)
-    low_high = (low, high)
-
-    plt.hist(decisions[0],
-             color='r', alpha=0.5, range=low_high, bins=bins,
-             histtype='stepfilled', normed=True,
-             label='Class {} (train)'.format(class_n))
-    plt.hist(decisions[1],
-             color='b', alpha=0.5, range=low_high, bins=bins,
-             histtype='stepfilled', normed=True,
-             label='Rest (train)')
-
-    hist, bins = np.histogram(decisions[2],
-                              bins=bins, range=low_high, normed=True)
-    scale = len(decisions[2]) / sum(hist)
-    err = np.sqrt(hist * scale) / scale
-
-    # width = (bins[1] - bins[0])
-    center = (bins[:-1] + bins[1:]) / 2
-    plt.errorbar(center, hist, yerr=err,
-                 fmt='o', c='r', label='Class {} (test)'.format(class_n))
-
-    hist, bins = np.histogram(decisions[3],
-                              bins=bins, range=low_high, normed=True)
-    scale = len(decisions[2]) / sum(hist)
-    err = np.sqrt(hist * scale) / scale
-
-    plt.errorbar(center, hist, yerr=err, fmt='o', c='b', label='Rest (test)')
-
-    plt.xlabel("{} output".format(c_name))
-    plt.ylabel("Arbitrary units")
-    plt.legend(loc='best')
-    file_name = '{}_test_train_comparison_class _{}.pdf'.format(c_name,
-                                                                class_n)
-    print 'Saving test-training distributions to file: {}'.format(file_name)
-    plt.savefig(file_name, format='pdf')
+def make_performance_plots(clf, n, number_of_dimensions,
+                           X_train, X_test, y_train, y_test):
+    print 'Creating performance plot for {}.'.format(n)
+    if hasattr(clf, 'decision_function'):
+        test_df = clf.decision_function(X_test)
+        train_df = clf.decision_function(X_train)
+        multi_class_roc_curves(clf.classes_, y_test, test_df, n, df=True)
+        compare_train_test_all_classes(clf.classes_, train_df, test_df, n,
+                                       y_train, y_test)
+    else:
+        test_prob = clf.predict_proba(X_test)
+        multi_class_roc_curves(clf.classes_, y_test, test_prob, n)
+    if number_of_dimensions == 2:
+        print 'Creating 2D decision boundary plot. Will take a moment... '
+        plot_decision_boundary_2D(X_train, y_train, clf, n)
 
 
 def main():
     # # currently fails
     # check_estimator(QuantileClassifier)
 
+    create_plots = True
     run_profiler = False
-    rand_state = None  # integer or None
+    rand_state = 9  # integer or None
     number_of_classes = 4
     number_of_dimensions = 2
-    number_of_samples = 10000
+    number_of_samples = 100
 
     if run_profiler:
         pr = cProfile.Profile()
@@ -161,18 +84,13 @@ def main():
         pr.runcall(pdf_classifier.fit, X, y)
     pdf_classifier.fit(X_train, y_train)
     pdf_y_predicted = pdf_classifier.predict(X_test)
-    print "\nPerformance of QuantileClassifier:"
-    print classification_report(y_test, pdf_y_predicted,
-                                # target_names=["background", "signal"]
-                                )
-    print "Confusion matrix for classes: ", np.unique(y)
-    print confusion_matrix(y_test, pdf_y_predicted, labels=np.unique(y))
-    if number_of_classes == 2:
-        print "Area under ROC curve: {:.4}".format(
-                                        roc_auc_score(y_test, pdf_y_predicted))
-    multi_class_roc_curves(pdf_classifier.classes_, y_test,
-                           pdf_classifier.decision_function(X_test),
-                           'QuantileClassifier')
+    show_performance('QuantileClassifier',
+                     y_test, pdf_y_predicted,
+                     np.unique(y), number_of_classes)
+    if create_plots:
+        make_performance_plots(pdf_classifier, 'QuantileClassifier',
+                               number_of_dimensions,
+                               X_train, X_test, y_train, y_test)
 
     if run_profiler:
         # pr.disable()
@@ -184,17 +102,12 @@ def main():
         pr.dump_stats('quantile_classifier.prof')
 
     print '\n\nRunning BDT...'
-    # dt = DecisionTreeClassifier(max_depth=3,
-    #                             min_samples_leaf=0.05*len(X_train))
-    # bdt = AdaBoostClassifier(dt,
-    #                          algorithm='SAMME',
-    #                          n_estimators=800,
-    #                          learning_rate=0.5)
-    bdt_param_grid = {'base_estimator__max_depth': [2, 3, 4],
+    # NOTE: the values to the right are the 'TMVA-like' parameters
+    bdt_param_grid = {'base_estimator__max_depth': [2, 3],  # 3
                       'base_estimator__min_samples_leaf':
-                      [0.01*i*len(X_train) for i in [1., 5., 10.]],
-                      'n_estimators': [500, 800],
-                      'learning_rate': [0.5, 0.75]}
+                      [0.01*i*len(X_train) for i in [1., 5., 10.]],  # 5.
+                      'n_estimators': [100, 200],  # 800
+                      'learning_rate': [0.5, 0.75]}  # 0.5
     bdt = GridSearchCV(AdaBoostClassifier(DecisionTreeClassifier(),
                                           algorithm='SAMME'),
                        param_grid=bdt_param_grid)
@@ -202,20 +115,13 @@ def main():
     print 'Finding best best fit for BDT parameters...'
     bdt.fit(X_train, y_train)
     bdt_y_predicted = bdt.predict(X_test)
-    print ("\nPerformance of BDT (best fit params "
-           "{}):".format(bdt.best_params_))
-    print classification_report(y_test, bdt_y_predicted,
-                                # target_names=["background", "signal"]
-                                )
-    print "Confusion matrix for classes: ", np.unique(y)
-    print confusion_matrix(y_test, bdt_y_predicted, labels=np.unique(y))
-    if number_of_classes == 2:
-        print "Area under ROC curve: {:.4}".format(
-                                    roc_auc_score(y_test, bdt_y_predicted))
-    # multi_class_roc_curves(bdt.classes_, y_test,
-    multi_class_roc_curves(bdt.best_estimator_.classes_, y_test,
-                           bdt.decision_function(X_test),
-                           'BoostedDecisionTree')
+    show_performance('BDT (best fit params {}):'.format(bdt.best_params_),
+                     y_test, bdt_y_predicted,
+                     np.unique(y), number_of_classes)
+    if create_plots:
+        make_performance_plots(bdt.best_estimator_, 'BoostedDecisionTree',
+                               number_of_dimensions,
+                               X_train, X_test, y_train, y_test)
 
     print '\n\nRunning SVC...'
     svc_param_grid = {'kernel': ('linear', 'rbf'),
@@ -228,23 +134,38 @@ def main():
     print 'Finding best best fit for SVC parameters...'
     svc.fit(X_train, y_train)
     svc_y_predicted = svc.predict(X_test)
-    print ("\nPerformance of SVC (best fit params "
-           "{}):".format(svc.best_params_))
-    print classification_report(y_test, svc_y_predicted,
-                                # target_names=["background", "signal"]
-                                )
-    print "Confusion matrix for classes: ", np.unique(y)
-    print confusion_matrix(y_test, svc_y_predicted, labels=np.unique(y))
-    if number_of_classes == 2:
-        print "Area under ROC curve: {:.4}".format(
-                                    roc_auc_score(y_test, svc_y_predicted))
-    # multi_class_roc_curves(bdt.classes_, y_test,
-    multi_class_roc_curves(svc.best_estimator_.classes_, y_test,
-                           svc.decision_function(X_test),
-                           'SupportVectorMachine')
+    show_performance('SVC (best fit params {}):'.format(svc.best_params_),
+                     y_test, svc_y_predicted,
+                     np.unique(y), number_of_classes)
+    if create_plots:
+        make_performance_plots(svc.best_estimator_, 'SupportVectorMachine',
+                               number_of_dimensions,
+                               X_train, X_test, y_train, y_test)
+
+    print '\n\nRunning KNeighborsClassifier...'
+    knn_param_grid = {'n_neighbors': [1, 5, 10],
+                      'algorithm': ['brute']}
+    knn = GridSearchCV(KNeighborsClassifier(),
+                       param_grid=knn_param_grid)
+    # knn = KNeighborsClassifier()
+
+    # print 'Finding best best fit for KNN parameters...'
+    print 'Running KNN...'
+    knn.fit(X_train, y_train)
+    knn_y_predicted = knn.predict(X_test)
+    show_performance('KNN (best fit params {}):'.format(knn.best_params_),
+    # show_performance('KNeighborsClassifier',
+                     y_test, knn_y_predicted,
+                     np.unique(y), number_of_classes)
+    if create_plots:
+        # make_performance_plots(knn, 'KNeighborsClassifier',
+        make_performance_plots(knn.best_estimator_, 'KNeighborsClassifier',
+                               number_of_dimensions,
+                               X_train, X_test, y_train, y_test)
 
     # Some helpful info for interpreting what printed
-    print ("\n\nAs a reminder, the confusion matrix is defined as C_{i, j} is "
+    print "\n\nAs a reminder:"
+    print ("\n\nThe confusion matrix C_{i, j} is "
            "equal to the number of observations known to be in group i but "
            "predicted to be in group j")
     print ("Precision is the true-positive rate divided by the sum of the "
