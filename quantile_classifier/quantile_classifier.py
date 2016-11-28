@@ -329,10 +329,7 @@ class QuantileClassifier (BaseEstimator, ClassifierMixin):
         if sample_weight is None:
             sample_weight = np.ones(X.shape[0])
 
-        if self.metric is None:
-            metric = _LLR_metric
-        else:
-            metric = self.metric
+        metric = self._get_metric()
 
         # index is the class label
         self.pdfs_ = {}
@@ -387,10 +384,7 @@ class QuantileClassifier (BaseEstimator, ClassifierMixin):
         # Input validation
         X = check_array(X)
 
-        if self.metric is None:
-            metric = _LLR_metric
-        else:
-            metric = self.metric
+        metric = self._get_metric()
 
         # logic here
         percentile_ratios_ = self._compute_decision_dict(X, metric)
@@ -448,6 +442,12 @@ class QuantileClassifier (BaseEstimator, ClassifierMixin):
             sub_dists[subclass_label] = \
                 np.sort(m_dist[self.y_ == subclass_label])
         return sub_dists
+
+    def _get_metric(self):
+        if self.metric is None:
+            return _LLR_metric
+        else:
+            return self.metric
 
     def _compute_decision_dict(self, X, metric):
         # return self._compute_percentile_ratio_dict(X, metric)
@@ -542,10 +542,7 @@ class QuantileClassifier (BaseEstimator, ClassifierMixin):
         # Input validation
         X = check_array(X)
 
-        if self.metric is None:
-            metric = _LLR_metric
-        else:
-            metric = self.metric
+        metric = self._get_metric()
 
         # logic here
         percentile_ratios_ = self._compute_decision_dict(X, metric)
