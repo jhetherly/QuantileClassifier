@@ -69,6 +69,8 @@ class _EmpiricalMarginalDistributions:
 
         # store the marginal (per feature) empirical cumulative
         # distributions (assumes X has dimensions (n_samples, n_features))
+        # trust determines whether or not to trust the normalization of the
+        #   data or estimate it from a fit to the empirical distributions
 
         # check for monotonic weights
         sum_weights = np.sum(sample_weight)
@@ -137,6 +139,11 @@ class _EmpiricalMarginalDistributions:
                 weights_[i] = np.array(new_weights)
                 ecdfs_[i] = np.cumsum(weights_[i])
 
+        # save normalizations
+        self.norms_ = []
+        for row in ecdfs_:
+            self.norms_.append(row[-1])
+
         # now to "normalize" the ecdfs
         if not trust:
             from scipy.optimize import curve_fit
@@ -181,6 +188,7 @@ class _EmpiricalMarginalDistributions:
 
                 # if new peak is less than 5% higher than old one, use it
                 if (pars[0] - peak)/peak <= 0.05:
+                    self.norms_[i] = pars[0]
                     row /= pars[0]
                 else:
                     row /= peak
