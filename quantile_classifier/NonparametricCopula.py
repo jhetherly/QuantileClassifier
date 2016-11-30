@@ -371,24 +371,42 @@ class NonparametricCopula (BaseEstimator):
             else:
                 from sklearn.grid_search import GridSearchCV
             from sklearn.neighbors import KernelDensity
+            from scipy.sparse.csgraph import minimum_spanning_tree
             import itertools
 
             abs_weights = np.abs(sample_weight)
             reduced_total = int(X.shape[0]/float(self.reduction_factor))
-            # randomly sample points, but weight by sample weights
+            # randomly sample points, but weigh them by sample weights
             reduced_indices = np.random.choice(X.shape[0], size=reduced_total,
                                                replace=False,
                                                p=abs_weights /
                                                np.sum(np.abs(sample_weight)))
             U_ = self.emds_(X)
             reduced_U_ = U_[reduced_indices]
-            for pair in itertools.combinations(np.arange(X.shape[1]), 2):
-                print rdc(reduced_U_[:, pair[0]], reduced_U_[:, pair[1]])
-                print pair
-            exit()
-            # use grid search cross-validation to optimize the bandwidth
             Z_ = self._gaussian_coord_transform(X)
             reduced_Z_ = Z_[reduced_indices]
+            params = {'bandwidth': np.linspace(0.1, 0.3, 20)}
+            grid = GridSearchCV(KernelDensity(kernel='gaussian'),
+                                params,
+                                verbose=20,
+                                n_jobs=-1
+                                # cv=self.reduction_factor
+                                )
+            graph = np.zeros((X.shape[1], X.shape[1]))
+            for pair in itertools.combinations(np.arange(X.shape[1]), 2):
+                graph[pair] = rdc(reduced_U_[:, pair[0]],
+                                  reduced_U_[:, pair[1]])
+            for indices in minimum_spanning_tree(-1*graph).nonzero():
+                Z_pair = reduced_Z_[:, indices]
+                # denom = np.product(stat.norm.pdf(Z_pair), axis=1)
+
+                grid.fit(Z_pair)
+                bw = grid.best_estimator_.bandwidth
+                kde = KernelDensity(kernel='gaussian', bandwidth=bw)
+                kde.fit(Z_pair)
+                print bw
+            exit()
+            # use grid search cross-validation to optimize the bandwidth
             Z_to_use_ = reduced_Z_[:, 0].reshape(-1, 1)
             # params = {'bandwidth': np.logspace(-3, -1, 5)}
             params = {'bandwidth': np.linspace(0.02, 0.24, 12)}
