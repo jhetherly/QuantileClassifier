@@ -3,6 +3,42 @@ import scipy.stats as stat
 from sklearn.base import BaseEstimator
 
 
+# TODO: write unit tests
+def rdc(x, y, k=20, s=1/6., f=np.sin):
+    """
+    Compute the randomized dependence coefficient
+    """
+    # this is based on the paper titled (https://arxiv.org/abs/1304.7717):
+    # "The Randomized Dependence Coefficient"
+    # very good at finding nonlinear correlations among pairs of variables
+    # the original was written in R (just 5 lines!), this is my translation
+    # to numpy/scipy/scikit-learn (the original code is in the comments)
+    from sklearn.cross_decomposition import CCA
+
+    # x <- cbind(apply(as.matrix(x),2,function(u)rank(u)/length(u)),1)
+    # y <- cbind(apply(as.matrix(y),2,function(u)rank(u)/length(u)),1)
+    x = stat.rankdata(x)/x.size
+    y = stat.rankdata(y)/y.size
+    x = np.insert(x[:, np.newaxis], 1, 1, axis=1)
+    y = np.insert(y[:, np.newaxis], 1, 1, axis=1)
+    # x <- s/ncol(x)*x%*%matrix(rnorm(ncol(x)*k),ncol(x))
+    # y <- s/ncol(y)*y%*%matrix(rnorm(ncol(y)*k),ncol(y))
+    x = np.dot(s/x.shape[1]*x,
+               np.random.normal(size=x.shape[1]*k).reshape((x.shape[1], -1)))
+    y = np.dot(s/y.shape[1]*y,
+               np.random.normal(size=y.shape[1]*k).reshape((y.shape[1], -1)))
+    # cancor(cbind(f(x),1),cbind(f(y),1))$cor[1]
+    x = np.insert(f(x), x.shape[1], 1, axis=1)
+    y = np.insert(f(y), y.shape[1], 1, axis=1)
+    # the following is taken from:
+    # http://stackoverflow.com/questions/37398856/
+    # how-to-get-the-first-canonical-correlation-from-sklearns-cca-module
+    cca = CCA(n_components=1)
+    x_c, y_c = cca.fit_transform(x, y)
+    return np.corrcoef(x_c.T, y_c.T)[0, 1]
+
+
+# TODO: write unit tests
 def remove_bad_weights(X, sample_weight, limited_features=None):
     # handle bad weights by grouping nearby points until a net
     # positive/negative weight is found, then averaging over the coordinates of
@@ -78,6 +114,7 @@ def remove_bad_weights(X, sample_weight, limited_features=None):
     return X, sample_weight
 
 
+# TODO: write unit tests (with plots)
 class _EmpiricalMarginalDistributions:
     """
     Compute the empirical marginal distributions given a set of data
@@ -297,7 +334,6 @@ class NonparametricCopula (BaseEstimator):
         """Store all values of parameters and nothing else
 
         Keyword arguments:
-        estimator -- estimator to use for 1- and 2-D density estimation
         """
         import inspect
 
@@ -335,24 +371,46 @@ class NonparametricCopula (BaseEstimator):
             else:
                 from sklearn.grid_search import GridSearchCV
             from sklearn.neighbors import KernelDensity
+            import itertools
 
-            U_ = self._gaussian_coord_transform(X)
+            abs_weights = np.abs(sample_weight)
+            reduced_total = int(X.shape[0]/float(self.reduction_factor))
+            # randomly sample points, but weight by sample weights
+            reduced_indices = np.random.choice(X.shape[0], size=reduced_total,
+                                               replace=False,
+                                               p=abs_weights /
+                                               np.sum(np.abs(sample_weight)))
+            U_ = self.emds_(X)
+            reduced_U_ = U_[reduced_indices]
+            for pair in itertools.combinations(np.arange(X.shape[1]), 2):
+                print rdc(reduced_U_[:, pair[0]], reduced_U_[:, pair[1]])
+                print pair
+            exit()
             # use grid search cross-validation to optimize the bandwidth
-            params = {'bandwidth': np.logspace(-3, -1, 20)}
+            Z_ = self._gaussian_coord_transform(X)
+            reduced_Z_ = Z_[reduced_indices]
+            Z_to_use_ = reduced_Z_[:, 0].reshape(-1, 1)
+            # params = {'bandwidth': np.logspace(-3, -1, 5)}
+            params = {'bandwidth': np.linspace(0.02, 0.24, 12)}
             grid = GridSearchCV(KernelDensity(kernel='gaussian'),
                                 params,
-                                verbose=20,
-                                n_jobs=-1,
-                                cv=self.reduction_factor*10)
-            grid.fit(U_[:, 0].reshape(-1, 1))
-            print("best bandwidth: {0}".format(grid.best_estimator_.bandwidth))
-            exit()
+                                # verbose=20,
+                                n_jobs=-1
+                                # cv=self.reduction_factor
+                                )
+            grid.fit(Z_to_use_)
+            bw = grid.best_estimator_.bandwidth
+            # use the best estimator to compute the kernel density estimate
+            kde = lambda u,\
+                         kde=KernelDensity(kernel='gaussian',
+                                           bandwidth=bw).fit(Z_to_use_):\
+                         np.exp(kde.score_samples(u))
             # bw = X.shape[0]**(-1./(X.shape[1]+4))
             # here use d = 1 as this will be used for marginal densities
             bw = X.shape[0]**(-1./5.)
             self.estimator = \
                 lambda u,\
-                kde=KernelDensity(kernel='gaussian', bandwidth=bw).fit(U_):\
+                kde=KernelDensity(kernel='gaussian', bandwidth=bw).fit(Z_):\
                 np.exp(kde.score_samples(u))
         # TODO: implement user-specified bounds on coordinates
         self.mpdfs_ = []
