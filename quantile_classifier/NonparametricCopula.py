@@ -1,30 +1,46 @@
 import numpy as np
+import scipy.stats as stat
 from sklearn.base import BaseEstimator
 
 
-def remove_bad_weights(X, sample_weight):
+def remove_bad_weights(X, sample_weight, limited_features=None):
     # handle bad weights by grouping nearby points until a net
     # positive/negative weight is found, then averaging over the coordinates of
     # those points
+    # limited_features is a list of feature indices to find the nearest
+    # neighbors along, otherwise all features are used
+
+    if np.all(sample_weight >= 0.0) or np.all(sample_weight <= 0.0):
+        # no bad points found, exiting
+        return X, sample_weight
+
     from scipy.spatial import cKDTree
 
+    reduced_feature_search = limited_features is not None
     sum_weights = np.sum(sample_weight)
     if sum_weights == 0.0:
         raise ValueError(("The sum of weights cannot be zero. "
                           "Please send better data."))
     sum_weights_is_positive = sum_weights > 0.0
-    bad_point_indices = sample_weight < 0.0
+
+    # sort points by the worst offenders
+    if sum_weights_is_positive:
+        bad_point_indices = sample_weight < 0.0
+    else:
+        bad_point_indices = sample_weight > 0.0
     worst_points_indices = np.argsort(
                                 sample_weight[bad_point_indices])
 
-    tree_ = cKDTree(X)
-    # this holds the newly computed averages coords
+    if not reduced_feature_search:
+        tree_ = cKDTree(X)
+    else:
+        tree_ = cKDTree(X[:, limited_features])
+    # this holds the newly computed averaged coords
     new_X = []
     # this holds the new sample weight
     new_sample_weight = []
     # this holds the indices to remove in both the X and sample_weight
     # arrays
-    # indices_to_remove = []
     indices_to_remove_set = set()
     n_samples_total = X.shape[0]
 
@@ -32,7 +48,10 @@ def remove_bad_weights(X, sample_weight):
     for row_i in range(X_bad.shape[0]):
         coord = X_bad[row_i]
         for n_neighbors in range(1, n_samples_total):
-            dd, ii = tree_.query([coord], k=n_neighbors)
+            if not reduced_feature_search:
+                dd, ii = tree_.query([coord], k=n_neighbors)
+            else:
+                dd, ii = tree_.query([coord[limited_features]], k=n_neighbors)
             if n_neighbors != 1:
                 ii = ii[0]
             ii = [x for x in ii if x not in indices_to_remove_set]
@@ -64,7 +83,7 @@ class _EmpiricalMarginalDistributions:
     Compute the empirical marginal distributions given a set of data
     """
 
-    def __init__(self, X, sample_weight, trust=True):
+    def __init__(self, X, sample_weight, trust=True, reduction_factor=None):
         from scipy.interpolate import PchipInterpolator
 
         # store the marginal (per feature) empirical cumulative
@@ -93,14 +112,31 @@ class _EmpiricalMarginalDistributions:
         xs__ = X_T[np.arange(X_T.shape[0])[:, None],
                    sorted_indices.T]
         weights__ = sample_weight[sorted_indices].T
-        ecdfs__ = np.cumsum(sample_weight[sorted_indices], axis=0).T
+        if reduction_factor is None:
+            ecdfs__ = np.cumsum(sample_weight[sorted_indices], axis=0).T
         for i in range(X_T.shape[0]):
-            xs_.append(xs__[i])
-            weights_.append(weights__[i])
-            ecdfs_.append(ecdfs__[i])
-            if ecdfs_[-1][-1] <= 0.0:
-                raise ValueError(("Sum of weights is zero or negative! "
-                                  "Please send better data."))
+            if reduction_factor is None:
+                xs_.append(xs__[i])
+                weights_.append(weights__[i])
+                ecdfs_.append(ecdfs__[i])
+            else:
+                columns = int(X_T.shape[1]/float(reduction_factor))
+                ii = columns*reduction_factor
+                xs_.append(np.average(xs__[i][:ii].reshape((columns,
+                                                            reduction_factor)),
+                                      weights=
+                                        np.abs(weights__[i][:ii]).reshape((
+                                                  columns, reduction_factor)),
+                                      axis=1))
+                weights_.append(np.sum(weights__[i][:ii].reshape((
+                                        columns, reduction_factor)), axis=1))
+                if X_T.shape[1] % reduction_factor != 0:
+                    np.concatenate((xs_[-1], [np.average(
+                                                        xs__[i][ii:],
+                                                        weights=
+                                                np.abs(weights__[i][ii:]))]))
+                    np.concatenate((weights_[-1], [np.sum(weights__[i][ii:])]))
+                ecdfs_.append(np.cumsum(weights_[-1]))
 
         # tediously run through points and find duplicates
         for i in range(len(ecdfs_)):
@@ -140,9 +176,9 @@ class _EmpiricalMarginalDistributions:
                 ecdfs_[i] = np.cumsum(weights_[i])
 
         # save normalizations
-        self.norms_ = []
-        for row in ecdfs_:
-            self.norms_.append(row[-1])
+        norms_ = np.empty(X_T.shape[0], dtype=np.dtype('Float64'))
+        for i, row in enumerate(ecdfs_):
+            norms_[i] = row[-1]
 
         # now to "normalize" the ecdfs
         if not trust:
@@ -188,7 +224,7 @@ class _EmpiricalMarginalDistributions:
 
                 # if new peak is less than 5% higher than old one, use it
                 if (pars[0] - peak)/peak <= 0.05:
-                    self.norms_[i] = pars[0]
+                    norms_[i] = pars[0]
                     row /= pars[0]
                 else:
                     row /= peak
@@ -199,10 +235,13 @@ class _EmpiricalMarginalDistributions:
 
         # now safe to construct monotonic interpolants
         self.ecdfs_ = []
+        self.pdfs_ = []
         for i in range(len(ecdfs_)):
             self.ecdfs_.append(PchipInterpolator(xs_[i],
                                ecdfs_[i],
                                extrapolate=True))
+            self.pdfs_.append(self.ecdfs_[-1].derivative())
+        self.norm_ = np.max(norms_)
 
     def __call__(self, X):
         # calculate the marginal (per feature) empirical cumulative
@@ -218,6 +257,22 @@ class _EmpiricalMarginalDistributions:
         for i in range(X.shape[1]):
             result_T[i] = np.clip(self.ecdfs_[i](X_T[i]), 0., 1.)
         return result
+
+    def pdf(self, X):
+        cdfs = self.evaluate(X)
+        result = X.copy()
+        result_T = result.T
+        X_T = X.T
+        cdfs_T = cdfs.T
+        for i in range(X.shape[1]):
+            result_T[i] = self.pdfs_[i](X_T[i])
+            result_T[i][cdfs_T[i] == 1.] = 0.
+            result_T[i][cdfs_T[i] == 0.] = 0.
+        return result
+
+    def spdf(self, X):
+        """Return the pdfs scaled by the overall normalization"""
+        return self.pdf(X)*self.norm_
 
     def _print_fit_results(self, pars, pcov, n, ci, param_names):
         from scipy.stats.distributions import t
@@ -238,7 +293,7 @@ class _EmpiricalMarginalDistributions:
 
 class NonparametricCopula (BaseEstimator):
 
-    def __init__(self, estimator=None, trust_ecdfs=True):
+    def __init__(self, trust_ecdfs=True, reduction_factor=None):
         """Store all values of parameters and nothing else
 
         Keyword arguments:
@@ -266,7 +321,46 @@ class NonparametricCopula (BaseEstimator):
             sample_weight = np.ones(X.shape[0])
 
         print 'Calculating the marginal empirical distributions'
-        self.emd_ = _EmpiricalMarginalDistributions(X,
-                                                    sample_weight,
-                                                    self.trust_ecdfs)
+        self.emds_ = _EmpiricalMarginalDistributions(X,
+                                                     sample_weight,
+                                                     trust=self.trust_ecdfs,
+                                                     reduction_factor=
+                                                     self.reduction_factor)
+
         print 'Calculating the marginal densities'
+        if True:
+            import sklearn
+            if int(sklearn.__version__.split('.')[1]) >= 18:
+                from sklearn.model_selection import GridSearchCV
+            else:
+                from sklearn.grid_search import GridSearchCV
+            from sklearn.neighbors import KernelDensity
+
+            U_ = self._gaussian_coord_transform(X)
+            # use grid search cross-validation to optimize the bandwidth
+            params = {'bandwidth': np.logspace(-3, -1, 20)}
+            grid = GridSearchCV(KernelDensity(kernel='gaussian'),
+                                params,
+                                verbose=20,
+                                n_jobs=-1,
+                                cv=self.reduction_factor*10)
+            grid.fit(U_[:, 0].reshape(-1, 1))
+            print("best bandwidth: {0}".format(grid.best_estimator_.bandwidth))
+            exit()
+            # bw = X.shape[0]**(-1./(X.shape[1]+4))
+            # here use d = 1 as this will be used for marginal densities
+            bw = X.shape[0]**(-1./5.)
+            self.estimator = \
+                lambda u,\
+                kde=KernelDensity(kernel='gaussian', bandwidth=bw).fit(U_):\
+                np.exp(kde.score_samples(u))
+        # TODO: implement user-specified bounds on coordinates
+        self.mpdfs_ = []
+        for i in range(X.shape[1]):
+            column = X[:, i]
+
+    # def _gaussian_transform(self, U):
+    #     return stat.norm.pdf(stat.norm.ppf(U))
+
+    def _gaussian_coord_transform(self, X):
+        return stat.norm.ppf(self.emds_(X))
