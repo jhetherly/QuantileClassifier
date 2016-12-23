@@ -38,6 +38,9 @@ def rdc(x, y, k=20, s=1/6., f=np.sin):
     return np.corrcoef(x_c.T, y_c.T)[0, 1]
 
 
+# TODO: generalize this to allow for a lower (upper) bound, 
+#       for specification of overall sign of weights,
+#       and for equality or strict gt/lt
 # TODO: write unit tests
 def remove_bad_weights(X, sample_weight, limited_features=None):
     # handle bad weights by grouping nearby points until a net
@@ -221,24 +224,25 @@ class _EmpiricalMarginalDistributions:
         if not trust:
             from scipy.optimize import curve_fit
 
-            def generalize_logistic(x, K, B, M, nu):
+            def generalize_logistic(x, K, A, B, M, nu):
                 exp = np.exp(B*(M - x))
-                return K*np.power(1.0 + exp, -1.0/nu)
+                return A + (K - A)*np.power(1.0 + exp, -1.0/nu)
 
-            def generalize_logistic_gradient(x, K, B, M, nu):
+            def generalize_logistic_gradient(x, K, A, B, M, nu):
                 dif = x - M
                 exp = np.exp(-B*(dif))
                 power_arg = 1.0 + exp
                 denom = 1.0/nu*np.power(power_arg, -1.0/nu - 1.0)
                 dK = np.power(power_arg, -1.0/nu)
-                dB = K*dif*exp*denom
-                dM = -K*B*exp*denom
-                dnu = K*np.log(power_arg)/(nu*nu)*dK
-                return np.array([dK, dB, dM, dnu]).T
+                dA = 1. - dK
+                dB = (K - A)*dif*exp*denom
+                dM = -(K - A)*B*exp*denom
+                dnu = (K - A)*np.log(power_arg)/(nu*nu)*dK
+                return np.array([dK, dA, dB, dM, dnu]).T
 
-            initial_params = np.array([1.0, 1.0, 0.0, 1.0])
-            param_bounds = ([0., 0., -np.inf, 0.],
-                            [np.inf, np.inf, np.inf, np.inf])
+            initial_params = np.array([1.0, 0.0, 1.0, 0.0, 1.0])
+            param_bounds = ([0., -1., 0., -np.inf, 0.],
+                            [np.inf, 0., np.inf, np.inf, np.inf])
             for i in range(len(ecdfs_)):
                 row = ecdfs_[i]
                 peak = row[-1]
@@ -254,8 +258,8 @@ class _EmpiricalMarginalDistributions:
                                        max_nfev=15000,
                                     #    verbose=2,
                                        )
-                # param_names = {0: 'norm', 1: 'exp coef',
-                #                2: 'offset', 3: 'exp'}
+                # param_names = {0: 'norm', 1: 'lower bound', 2: 'exp coef',
+                #                3: 'offset', 4: 'exp'}
                 # self._print_fit_results(pars, pcov, row.size,
                 #                         95, param_names)
 
@@ -283,9 +287,9 @@ class _EmpiricalMarginalDistributions:
     def __call__(self, X):
         # calculate the marginal (per feature) empirical cumulative
         # distributions (assumes X has dimensions (n_samples, n_features))
-        return self.evaluate(X)
+        return self.cdf(X)
 
-    def evaluate(self, X):
+    def cdf(self, X):
         # calculate the marginal (per feature) empirical cumulative
         # distributions (assumes X has dimensions (n_samples, n_features))
         result = X.copy()
@@ -295,8 +299,9 @@ class _EmpiricalMarginalDistributions:
             result_T[i] = np.clip(self.ecdfs_[i](X_T[i]), 0., 1.)
         return result
 
-    def pdf(self, X):
-        cdfs = self.evaluate(X)
+    def pdf(self, X, cdfs=None):
+        if cdfs is None:
+            cdfs = self.cdf(X)
         result = X.copy()
         result_T = result.T
         X_T = X.T
@@ -350,93 +355,126 @@ class NonparametricCopula (BaseEstimator):
         X has dimensions (n_samples, n_features)
         """
         from sklearn.utils import check_array
+        from sklearn.neighbors import KernelDensity
+        from scipy.sparse.csgraph import minimum_spanning_tree
+        import itertools
 
         X = check_array(X, order='C')
 
         if sample_weight is None:
             sample_weight = np.ones(X.shape[0])
 
-        print 'Calculating the marginal empirical distributions'
         self.emds_ = _EmpiricalMarginalDistributions(X,
                                                      sample_weight,
                                                      trust=self.trust_ecdfs,
                                                      reduction_factor=
                                                      self.reduction_factor)
 
-        print 'Calculating the marginal densities'
+        abs_weights = np.abs(sample_weight)
+        reduced_total = int(X.shape[0]/float(self.reduction_factor))
+        # randomly sample points, but weigh them by sample weights
+        reduced_indices = np.random.choice(X.shape[0], size=reduced_total,
+                                           replace=False,
+                                           p=abs_weights /
+                                           np.sum(np.abs(sample_weight)))
+        U_ = self.emds_.cdf(X)
+        reduced_U_ = U_[reduced_indices]
+        reduced_weights_ = sample_weight[reduced_indices]
         if True:
-            import sklearn
-            if int(sklearn.__version__.split('.')[1]) >= 18:
-                from sklearn.model_selection import GridSearchCV
-            else:
-                from sklearn.grid_search import GridSearchCV
-            from sklearn.neighbors import KernelDensity
-            from scipy.sparse.csgraph import minimum_spanning_tree
-            import itertools
+            U_rebinned = self._make_2D_linear_binning_for_copula(
+                            U=reduced_U_[:, [0, 1]],
+                            weights=reduced_weights_)
+            print U_rebinned
+            print U_rebinned.sum()
+            print U_rebinned.shape
+        exit()
+        # Z_ = self._gaussian_coord_transform(X)
+        # self._first_tree_reduced_Z = Z_[reduced_indices]
+        # self._first_tree_kdes = []
+        # graph = np.zeros((X.shape[1], X.shape[1]))
+        # for pair in itertools.combinations(np.arange(X.shape[1]), 2):
+        #     graph[pair] = rdc(self._first_tree_reduced_U[:, pair[0]],
+        #                       self._first_tree_reduced_U[:, pair[1]])
+        # for indices in minimum_spanning_tree(-1*graph).nonzero():
+        #     Z_pair = self._first_tree_reduced_Z[:, indices]
+        #     # denom = np.product(stat.norm.pdf(Z_pair), axis=1)
+        #
+        #     self._first_tree_kdes.append(
+        #         [indices,
+        #          lambda u,
+        #          kde=KernelDensity(kernel='gaussian',
+        #                            bandwidth=0.1).fit(Z_pair):
+        #          np.exp(kde.score_samples(u))])
 
-            abs_weights = np.abs(sample_weight)
-            reduced_total = int(X.shape[0]/float(self.reduction_factor))
-            # randomly sample points, but weigh them by sample weights
-            reduced_indices = np.random.choice(X.shape[0], size=reduced_total,
-                                               replace=False,
-                                               p=abs_weights /
-                                               np.sum(np.abs(sample_weight)))
-            U_ = self.emds_(X)
-            reduced_U_ = U_[reduced_indices]
-            Z_ = self._gaussian_coord_transform(X)
-            reduced_Z_ = Z_[reduced_indices]
-            params = {'bandwidth': np.linspace(0.1, 0.3, 20)}
-            grid = GridSearchCV(KernelDensity(kernel='gaussian'),
-                                params,
-                                verbose=20,
-                                n_jobs=-1
-                                # cv=self.reduction_factor
-                                )
-            graph = np.zeros((X.shape[1], X.shape[1]))
-            for pair in itertools.combinations(np.arange(X.shape[1]), 2):
-                graph[pair] = rdc(reduced_U_[:, pair[0]],
-                                  reduced_U_[:, pair[1]])
-            for indices in minimum_spanning_tree(-1*graph).nonzero():
-                Z_pair = reduced_Z_[:, indices]
-                # denom = np.product(stat.norm.pdf(Z_pair), axis=1)
+    def score_samples(self, X):
+        from sklearn.utils import check_array
 
-                grid.fit(Z_pair)
-                bw = grid.best_estimator_.bandwidth
-                kde = KernelDensity(kernel='gaussian', bandwidth=bw)
-                kde.fit(Z_pair)
-                print bw
-            exit()
-            # use grid search cross-validation to optimize the bandwidth
-            Z_to_use_ = reduced_Z_[:, 0].reshape(-1, 1)
-            # params = {'bandwidth': np.logspace(-3, -1, 5)}
-            params = {'bandwidth': np.linspace(0.02, 0.24, 12)}
-            grid = GridSearchCV(KernelDensity(kernel='gaussian'),
-                                params,
-                                # verbose=20,
-                                n_jobs=-1
-                                # cv=self.reduction_factor
-                                )
-            grid.fit(Z_to_use_)
-            bw = grid.best_estimator_.bandwidth
-            # use the best estimator to compute the kernel density estimate
-            kde = lambda u,\
-                         kde=KernelDensity(kernel='gaussian',
-                                           bandwidth=bw).fit(Z_to_use_):\
-                         np.exp(kde.score_samples(u))
-            # bw = X.shape[0]**(-1./(X.shape[1]+4))
-            # here use d = 1 as this will be used for marginal densities
-            bw = X.shape[0]**(-1./5.)
-            self.estimator = \
-                lambda u,\
-                kde=KernelDensity(kernel='gaussian', bandwidth=bw).fit(Z_):\
-                np.exp(kde.score_samples(u))
-        # TODO: implement user-specified bounds on coordinates
-        self.mpdfs_ = []
-        for i in range(X.shape[1]):
-            column = X[:, i]
+        X = check_array(X, order='C')
 
     # def _gaussian_transform(self, U):
     #     return stat.norm.pdf(stat.norm.ppf(U))
 
     def _gaussian_coord_transform(self, X):
         return stat.norm.ppf(self.emds_(X))
+
+    # TODO: possibly jit this or implement in cython
+    def _make_2D_linear_binning_for_copula(self, U, weights, size=(50, 50)):
+        """
+        Linear binning is used for down-sampling data while retaining much
+        higher fidelity (in terms of asymptotic behavior) than nearest-neighbor
+        binning (the usual type of binning).
+        A-----------------------------------B
+         |       |                         |
+         |                                 |
+         |       |                         |
+         |- - - -P- - - - - - - - - - - - -|
+         |       |                         |
+        D-----------------------------------C
+        For a 2D point P with weight wP:
+        Assign a weight to corner A of the proportion of area (times wP)
+            between P and C
+        Assign a weight to corner B of the proportion of area (times wP)
+            between P and D
+        Assign a weight to corner C of the proportion of area (times wP)
+            between P and A
+        Assign a weight to corner D of the proportion of area (times wP)
+            between P and B
+        """
+        result = np.zeros(size)
+        bin_sizes = [1.0/float(size[0]), 1.0/float(size[1])]
+        bin_area = bin_sizes[0]*bin_sizes[1]
+        max_bins = np.array(size) - 1
+        for i in range(U.shape[0]):
+            row = U[i]
+            weight = weights[i]
+            low_bins = np.floor(row/bin_sizes).astype(int)
+            if np.array_equal(max_bins, low_bins):
+                result[low_bins[0], low_bins[1]] += weight
+                continue
+            low_remainders = row - low_bins.astype(float)*bin_sizes
+            high_remainders = bin_sizes - low_remainders
+            low_high_remainders = low_remainders.copy()
+            low_high_remainders[1] = high_remainders[1]
+            low_area = weight*low_remainders[0]*low_remainders[1]/bin_area
+            low_high_area =\
+                weight*low_high_remainders[0]*low_high_remainders[1]/bin_area
+            if low_bins[1] + 1 == size[1]:
+                low_area = low_area + low_high_area
+                result[low_bins[0], low_bins[1]] += weight - low_area
+                result[low_bins[0] + 1, low_bins[1]] += low_area
+                continue
+            high_low_remainders = high_remainders.copy()
+            high_low_remainders[1] = low_remainders[1]
+            high_area = weight*high_remainders[0]*high_remainders[1]/bin_area
+            high_low_area =\
+                weight*high_low_remainders[0]*high_low_remainders[1]/bin_area
+            if low_bins[0] + 1 == size[0]:
+                low_area = low_area + high_low_area
+                result[low_bins[0], low_bins[1]] += weight - low_area
+                result[low_bins[0], low_bins[1] + 1] += low_area
+                continue
+            result[low_bins[0], low_bins[1]] += high_area
+            result[low_bins[0], low_bins[1] + 1] += high_low_area
+            result[low_bins[0] + 1, low_bins[1]] += low_high_area
+            result[low_bins[0] + 1, low_bins[1] + 1] += low_area
+        return result

@@ -12,11 +12,11 @@ def main():
         pr = cProfile.Profile()
 
     test_data = (data_high_end - data_low_end) * \
-        np.random.logistic(size=(1000, 3)) + data_low_end
+        np.random.logistic(size=(10000, 4)) + data_low_end
 
-    np.random.seed(0)
+    # np.random.seed(0)
     data = (data_high_end - data_low_end) * \
-        np.random.logistic(size=(1000000, 3)) + data_low_end
+        np.random.logistic(size=(1000000, 4)) + data_low_end
 
     pdf = NonparametricCopula(trust_ecdfs=False, reduction_factor=100)
     if run_profiler:
